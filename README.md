@@ -1,0 +1,1 @@
+# QWERTY_ripples_cardputerADV
