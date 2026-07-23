@@ -14,7 +14,10 @@ int16_t *pG1 = bufG1, *pG2 = bufG2;
 int16_t *pB1 = bufB1, *pB2 = bufB2;
 
 bool prevPressed[256] = {false};
-uint32_t lastKeyboardAccess = 0;
+
+// TCA8418(ADVのキーボードIC)のINTピン。ライブラリ既定値と同じ
+#define KB_INT_PIN 11
+uint32_t intLowSince = 0; // INTピンがLOWになり続けている開始時刻(0=HIGH)
 
 // Push Any Key表示用の変数
 bool hasPressedAnyKey = false;
@@ -157,10 +160,30 @@ void loop() {
 
     canvas.pushRotateZoom(120, 67.5, 0, 2.0, 2.0);
 
-    // 通信は30msに1回だけ実行。これ以外は一切I2Cに触れない
-    if (millis() - lastKeyboardAccess > 30) {
-        M5Cardputer.update();
+    // --- キーボード読み取り ---
+    // ライブラリのTCA8418リーダーはupdate()1回につきFIFOイベントを1個しか消費しない。
+    // 30msに1回だと同時押し連打でFIFO(10段)が溢れてイベントが消失するため、
+    // 毎フレーム複数回呼んでFIFOを空にする(イベントが無ければ即returnなのでコストほぼゼロ)
+    for (int i = 0; i < 10; i++) M5Cardputer.Keyboard.updateKeyList();
+    M5Cardputer.update();
 
+    // --- 復旧ウォッチドッグ ---
+    // ライブラリ内部の_isr_flagには競合があり、INT_STATクリア直後に新イベントが来ると
+    // フラグが false で上書きされ、INTピンがLOWのまま二度と割り込みが来なくなる(=キー入力死亡)。
+    // INTピンが500ms以上LOWのままなら詰まったと判断してリーダーを作り直す
+    if (digitalRead(KB_INT_PIN) == LOW) {
+        if (intLowSince == 0) {
+            intLowSince = millis();
+        } else if (millis() - intLowSince > 500) {
+            detachInterrupt(digitalPinToInterrupt(KB_INT_PIN)); // 旧リーダー破棄中の割り込みを防ぐ
+            M5Cardputer.Keyboard.begin(); // リーダー再生成→FIFOフラッシュ→INT再アーム
+            intLowSince = 0;
+        }
+    } else {
+        intLowSince = 0;
+    }
+
+    {
         auto state = M5Cardputer.Keyboard.keysState();
 
         bool currentPressed[256] = {false};
@@ -274,7 +297,5 @@ void loop() {
             }
             prevPressed[k] = currentPressed[k];
         }
-
-        lastKeyboardAccess = millis();
     }
 }
